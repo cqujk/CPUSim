@@ -1,21 +1,27 @@
 CXX := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -O2 -MMD -MP
 
-SOURCES := main.cpp simulation.cpp instruction.cpp memory.cpp cpu.cpp
-OBJECTS := $(SOURCES:.cpp=.o)
-DEPENDS := $(OBJECTS:.o=.d)
-TARGET := simulator
+COMMON_SOURCES := simulation.cpp pipeline_instruction.cpp pipeline_memory.cpp pipeline_cpu.cpp
+COMMON_OBJECTS := $(COMMON_SOURCES:.cpp=.o)
+COMMON_DEPENDS := $(COMMON_OBJECTS:.o=.d)
 
-.PHONY: all clean
-all: $(TARGET)
+.PHONY: all test clean
+all: simulator
 
-$(TARGET): $(OBJECTS)
+simulator: pipeline_main.o $(COMMON_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
+
+simulator_tests: pipeline_tests.o $(COMMON_OBJECTS)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+test: simulator_tests
+	./simulator_tests
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
--include $(DEPENDS)
+-include $(COMMON_DEPENDS) pipeline_main.d pipeline_tests.d
 
 clean:
-	rm -f $(OBJECTS) $(DEPENDS) $(TARGET)
+	rm -f $(COMMON_OBJECTS) $(COMMON_DEPENDS) pipeline_main.o pipeline_main.d \
+		pipeline_tests.o pipeline_tests.d simulator simulator_tests

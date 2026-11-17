@@ -9,7 +9,8 @@ struct TimingConfig {
     Tick cpuToMemoryLatency = 2;
     Tick memoryToCpuLatency = 2;
 
-    // ALU delay for the Add instruction.
+    // CPU clock interval and floating-point/ALU execution time.
+    Tick cpuCyclePeriod = 2;
     Tick addLatency = 1;
 };
 
