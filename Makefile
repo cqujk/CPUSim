@@ -1,27 +1,52 @@
 CXX := g++
+CPPFLAGS := -Iinclude/cpusim -Iinclude/cpusim/legacy
 CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -O2 -MMD -MP
+BUILD_DIR := build
+OBJECT_DIR := $(BUILD_DIR)/obj
 
-COMMON_SOURCES := simulation.cpp pipeline_instruction.cpp pipeline_memory.cpp pipeline_cpu.cpp
-COMMON_OBJECTS := $(COMMON_SOURCES:.cpp=.o)
-COMMON_DEPENDS := $(COMMON_OBJECTS:.o=.d)
+PIPELINE_SOURCES := \
+	src/simulation.cpp \
+	src/pipeline_instruction.cpp \
+	src/pipeline_memory.cpp \
+	src/pipeline_cpu.cpp
+PIPELINE_OBJECTS := $(patsubst src/%.cpp,$(OBJECT_DIR)/%.o,$(PIPELINE_SOURCES))
+PIPELINE_MAIN := $(OBJECT_DIR)/pipeline_main.o
+TEST_OBJECT := $(OBJECT_DIR)/tests/pipeline_tests.o
 
-.PHONY: all test clean
-all: simulator
+LEGACY_SOURCES := \
+	src/legacy/main.cpp \
+	src/legacy/cpu.cpp \
+	src/legacy/instruction.cpp \
+	src/legacy/memory.cpp
+LEGACY_OBJECTS := $(patsubst src/%.cpp,$(OBJECT_DIR)/%.o,$(LEGACY_SOURCES))
 
-simulator: pipeline_main.o $(COMMON_OBJECTS)
+.PHONY: all test legacy clean
+all: $(BUILD_DIR)/simulator
+
+$(BUILD_DIR)/simulator: $(PIPELINE_MAIN) $(PIPELINE_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
-simulator_tests: pipeline_tests.o $(COMMON_OBJECTS)
+$(BUILD_DIR)/simulator_tests: $(TEST_OBJECT) $(PIPELINE_OBJECTS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
-test: simulator_tests
-	./simulator_tests
+$(BUILD_DIR)/legacy-simulator: $(LEGACY_OBJECTS) $(OBJECT_DIR)/simulation.o
+	$(CXX) $(CXXFLAGS) -o $@ $^
 
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
+test: $(BUILD_DIR)/simulator_tests
+	./$(BUILD_DIR)/simulator_tests
 
--include $(COMMON_DEPENDS) pipeline_main.d pipeline_tests.d
+legacy: $(BUILD_DIR)/legacy-simulator
+
+$(OBJECT_DIR)/%.o: src/%.cpp
+	mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
+
+$(OBJECT_DIR)/tests/%.o: tests/%.cpp
+	mkdir -p $(dir $@)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
+
+-include $(PIPELINE_MAIN:.o=.d) $(PIPELINE_OBJECTS:.o=.d) \
+	$(TEST_OBJECT:.o=.d) $(LEGACY_OBJECTS:.o=.d)
 
 clean:
-	rm -f $(COMMON_OBJECTS) $(COMMON_DEPENDS) pipeline_main.o pipeline_main.d \
-		pipeline_tests.o pipeline_tests.d simulator simulator_tests
+	rm -rf $(BUILD_DIR)
