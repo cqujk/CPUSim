@@ -1,12 +1,14 @@
 #include "pipeline_cpu.hpp"
 
 #include <cstring>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <unistd.h>
 
 namespace model::pipeline {
 
@@ -27,6 +29,14 @@ double bitsToDouble(std::uint64_t bits) {
 std::string registerName(RegisterRef ref) {
     return std::string(ref.file == RegisterClass::Integer ? "x" : "f") +
            std::to_string(static_cast<unsigned>(ref.index));
+}
+
+bool useTerminalColor() {
+    const char* noColor = std::getenv("NO_COLOR");
+    if (noColor != nullptr && *noColor != '\0') return false;
+    const char* term = std::getenv("TERM");
+    return ::isatty(STDOUT_FILENO) != 0 &&
+           (term == nullptr || std::string(term) != "dumb");
 }
 
 } // namespace
@@ -524,6 +534,8 @@ void Cpu::requestFetchIfNeeded() {
 
 void Cpu::logPipeline(const TransferPlan& plan) const {
     if (!simulation_.traceEvents()) return;
+    const bool color = useTerminalColor();
+    if (color) std::cout << "\033[36m";
     std::cout << "[" << simulation_.now() << " ns] PIPE";
     for (std::size_t i = 0; i < pipeline_.size(); ++i) {
         std::cout << ' ' << stageName(i) << '=';
@@ -540,6 +552,7 @@ void Cpu::logPipeline(const TransferPlan& plan) const {
         }
     }
     if (plan.idHazard.stall) std::cout << " | ID stall: " << plan.idHazard.reason;
+    if (color) std::cout << "\033[0m";
     std::cout << '\n';
 }
 
