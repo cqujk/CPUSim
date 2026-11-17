@@ -7,12 +7,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <unordered_map>
 
 namespace model::pipeline {
 
-enum class Stage : std::size_t { IF = 0, ID = 1, EX = 2, MEM = 3, WB = 4 };
+enum class Stage : std::size_t {
+    IF = 0, ID1, ID2, EX1, EX2, MEM1, MEM2, WB, Count
+};
+
+inline constexpr std::size_t kPipelineStages =
+    static_cast<std::size_t>(Stage::Count);
 
 struct PipelineEntry {
     bool valid = false;
@@ -26,9 +32,13 @@ struct PipelineEntry {
     bool memoryComplete = false;
     bool resultValid = false;
     std::uint64_t resultBits = 0;
-    bool exStarted = false;
-    bool exComplete = false;
-    Tick exReadyAt = 0;
+    bool ex1Started = false;
+    bool ex1Complete = false;
+    Tick ex1ReadyAt = 0;
+    bool ex2Started = false;
+    bool ex2Complete = false;
+    Tick ex2ReadyAt = 0;
+    bool decoded = false;
     bool idOperandsValid = false;
     std::array<std::uint64_t, 2> idOperands{};
     std::uint64_t operandA = 0;
@@ -45,6 +55,9 @@ public:
         std::uint32_t entryAddress);
 
     void start();
+    void setPipelineDisplay(std::ostream& output) noexcept {
+        pipelineDisplay_ = &output;
+    }
     void setIntegerRegister(std::size_t index, std::uint32_t value);
     void setFloatingRegister(std::size_t index, double value);
     std::uint32_t integerRegister(std::size_t index) const;
@@ -56,16 +69,18 @@ public:
     std::uint64_t takenBranches() const noexcept { return takenBranches_; }
     std::uint64_t branchFlushes() const noexcept { return branchFlushes_; }
     bool halted() const noexcept { return halted_; }
-    const std::array<PipelineEntry, 5>& pipeline() const noexcept { return pipeline_; }
+    const std::array<PipelineEntry, kPipelineStages>& pipeline() const noexcept {
+        return pipeline_;
+    }
 
 private:
     struct SourceOperand { RegisterRef reg; const char* name; };
     struct HazardDecision { bool stall = false; std::string reason; };
     struct TransferPlan {
-        std::array<bool, 5> done{};
-        std::array<bool, 5> willMove{};
-        std::array<bool, 5> canAccept{};
-        HazardDecision idHazard;
+        std::array<bool, kPipelineStages> done{};
+        std::array<bool, kPipelineStages> willMove{};
+        std::array<bool, kPipelineStages> canAccept{};
+        HazardDecision id2Hazard;
     };
 
     void onClockEdge();
@@ -75,8 +90,10 @@ private:
     void onMemoryResponse(MemoryResponse response);
     void applyResponses();
     void pruneStaleFetchResponses();
-    void startExWork(PipelineEntry& entry);
-    void completeReadyExWork(PipelineEntry& entry);
+    void startEx1Work(PipelineEntry& entry);
+    void completeReadyEx1Work(PipelineEntry& entry);
+    void startEx2Work(PipelineEntry& entry);
+    void completeReadyEx2Work(PipelineEntry& entry);
     void captureIdOperands(PipelineEntry& entry) const;
     std::optional<std::uint64_t> resolveExOperand(RegisterRef source,
                                                   std::uint64_t idValue) const;
@@ -99,7 +116,8 @@ private:
     Memory& memory_;
     TimingConfig timing_;
     RegisterFile registers_;
-    std::array<PipelineEntry, 5> pipeline_{};
+    std::array<PipelineEntry, kPipelineStages> pipeline_{};
+    std::ostream* pipelineDisplay_ = nullptr;
     std::unordered_map<std::uint64_t, MemoryResponse> responseMailbox_;
     std::unordered_map<std::uint64_t, RequestKind> outstandingRequests_;
     std::uint32_t nextFetchPc_ = 0;

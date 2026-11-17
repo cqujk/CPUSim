@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -18,6 +19,25 @@ struct Options {
     std::size_t elements = 2;
     double addend = 0.5;
     model::TimingConfig timing{};
+    std::string traceFile = "simulation.log";
+};
+
+class ScopedOutputRedirect {
+public:
+    ScopedOutputRedirect(std::ostream& output, std::ostream& destination)
+        : output_(output), previous_(output.rdbuf(destination.rdbuf())) {}
+
+    ~ScopedOutputRedirect() {
+        output_.flush();
+        output_.rdbuf(previous_);
+    }
+
+    ScopedOutputRedirect(const ScopedOutputRedirect&) = delete;
+    ScopedOutputRedirect& operator=(const ScopedOutputRedirect&) = delete;
+
+private:
+    std::ostream& output_;
+    std::streambuf* previous_;
 };
 
 std::uint64_t parseUnsigned(const char* value, const char* option) {
@@ -60,6 +80,11 @@ Options parseOptions(int argc, char* argv[]) {
             options.timing.addLatency = parseUnsigned(value, "--add");
         } else if (option == "--addend") {
             options.addend = parseDouble(value, "--addend");
+        } else if (option == "--trace-file") {
+            options.traceFile = value;
+            if (options.traceFile.empty()) {
+                throw std::invalid_argument("--trace-file path must not be empty");
+            }
         } else {
             throw std::invalid_argument("unknown option: " + option);
         }
@@ -89,7 +114,7 @@ void loadProgram(model::pipeline::Memory& memory) {
 int main(int argc, char* argv[]) {
     try {
         const Options options = parseOptions(argc, argv);
-        model::Simulation simulation;
+        model::Simulation simulation(true, true);
         model::pipeline::Memory memory(simulation, options.timing);
         loadProgram(memory);
 
@@ -105,15 +130,27 @@ int main(int argc, char* argv[]) {
             options.elements * model::pipeline::kDoubleBytes));
         cpu.setFloatingRegister(2, options.addend);
 
-        std::cout << "Five-stage in-order pipeline; 32-bit addresses; 8-bit memory cells\n"
+        std::ostream pipelineConsole(std::cout.rdbuf());
+        cpu.setPipelineDisplay(pipelineConsole);
+
+        std::cout << "Eight-stage in-order pipeline; 32-bit addresses; 8-bit memory cells\n"
                   << "Clock=" << options.timing.cpuCyclePeriod << " ns, CPU->Memory="
                   << options.timing.cpuToMemoryLatency << " ns, Memory->CPU="
                   << options.timing.memoryToCpuLatency << " ns, ALU/FADD="
                   << options.timing.addLatency << " ns\n"
-                  << "Program: fld, fadd.d, fsd, addi, bne Loop, halt\n\n";
+                  << "Program: fld, fadd.d, fsd, addi, bne Loop, halt\n"
+                  << "Detailed trace: " << options.traceFile << '\n';
+        std::cout.flush();
 
-        cpu.start();
-        simulation.run();
+        {
+            std::ofstream traceFile(options.traceFile);
+            if (!traceFile) {
+                throw std::runtime_error("cannot open trace file: " + options.traceFile);
+            }
+            ScopedOutputRedirect redirect(std::cout, traceFile);
+            cpu.start();
+            simulation.run();
+        }
         if (!cpu.halted() || simulation.stopReason() != "ProgramHalt") {
             throw std::runtime_error("program did not halt before the event limit");
         }

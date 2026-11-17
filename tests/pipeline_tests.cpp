@@ -12,6 +12,9 @@ namespace {
 constexpr std::uint32_t kCodeBase = 0x00400000;
 constexpr std::uint32_t kDataBase = 0x10000000;
 
+static_assert(model::pipeline::kPipelineStages == 8,
+              "the eight-stage simulator must expose eight pipeline slots");
+
 void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error("test failed: " + message);
 }

@@ -145,7 +145,7 @@ void Cpu::issueMemoryRequest(PipelineEntry& entry) {
     outstandingRequests_.emplace(request.id, request.kind);
 
     if (simulation_.traceEvents()) {
-        std::cout << "[" << simulation_.now() << " ns] MEM issues "
+        std::cout << "[" << simulation_.now() << " ns] MEM1 issues "
                   << (request.kind == RequestKind::ReadDouble ? "fld" : "fsd")
                   << " seq=" << request.sequenceNumber << " request=" << request.id
                   << " address=0x" << std::hex << request.address << std::dec << '\n';
@@ -206,24 +206,24 @@ void Cpu::applyResponses() {
         }
     }
 
-    auto& mem = pipeline_[static_cast<std::size_t>(Stage::MEM)];
-    if (mem.valid && mem.requestIssued && !mem.memoryComplete) {
-        const auto found = responseMailbox_.find(mem.requestId);
+    auto& mem2 = pipeline_[static_cast<std::size_t>(Stage::MEM2)];
+    if (mem2.valid && mem2.requestIssued && !mem2.memoryComplete) {
+        const auto found = responseMailbox_.find(mem2.requestId);
         if (found != responseMailbox_.end()) {
             const auto& response = found->second;
-            if (response.sequenceNumber != mem.sequenceNumber ||
-                response.kind != (mem.instruction.opcode == Opcode::Fld
+            if (response.sequenceNumber != mem2.sequenceNumber ||
+                response.kind != (mem2.instruction.opcode == Opcode::Fld
                     ? RequestKind::ReadDouble : RequestKind::WriteDouble)) {
-                throw std::logic_error("data response does not match MEM slot");
+                throw std::logic_error("data response does not match MEM2 slot");
             }
-            if (mem.instruction.opcode == Opcode::Fld) {
-                mem.resultBits = response.dataBits;
-                mem.resultValid = true;
+            if (mem2.instruction.opcode == Opcode::Fld) {
+                mem2.resultBits = response.dataBits;
+                mem2.resultValid = true;
             }
-            mem.memoryComplete = true;
+            mem2.memoryComplete = true;
             if (simulation_.traceEvents()) {
-                std::cout << "[" << simulation_.now() << " ns] MEM completes seq="
-                          << mem.sequenceNumber << '\n';
+                std::cout << "[" << simulation_.now() << " ns] MEM2 completes seq="
+                          << mem2.sequenceNumber << '\n';
             }
             responseMailbox_.erase(found);
         }
@@ -288,7 +288,7 @@ Cpu::HazardDecision Cpu::checkIdHazard(const PipelineEntry& consumer) const {
     const auto sourceList = sources(consumer.instruction, sourceCount);
     for (std::size_t sourceIndex = 0; sourceIndex < sourceCount; ++sourceIndex) {
         const RegisterRef source = sourceList[sourceIndex].reg;
-        for (std::size_t stage = static_cast<std::size_t>(Stage::EX);
+        for (std::size_t stage = static_cast<std::size_t>(Stage::EX1);
              stage <= static_cast<std::size_t>(Stage::WB); ++stage) {
             const auto& producer = pipeline_[stage];
             if (!writes(producer, source)) continue;
@@ -300,7 +300,7 @@ Cpu::HazardDecision Cpu::checkIdHazard(const PipelineEntry& consumer) const {
                     producer.instruction.toString() + ", " + stageName(stage) +
                     ", result not ready)";
             }
-            break; // The youngest older writer owns the architectural value.
+            break; // The nearest older writer determines this operand value.
         }
         if (decision.stall) return decision;
     }
@@ -311,13 +311,20 @@ bool Cpu::stageDone(Stage stage, const PipelineEntry& entry) const {
     if (!entry.valid) return true;
     switch (stage) {
     case Stage::IF: return entry.instructionReady;
-    case Stage::ID: return true;
-    case Stage::EX: return entry.exComplete;
-    case Stage::MEM:
+    case Stage::ID1: return entry.decoded;
+    case Stage::ID2: return true;
+    case Stage::EX1: return entry.ex1Complete;
+    case Stage::EX2: return entry.ex2Complete;
+    case Stage::MEM1:
+        if (entry.instruction.opcode == Opcode::Fld ||
+            entry.instruction.opcode == Opcode::Fsd) return entry.requestIssued;
+        return true;
+    case Stage::MEM2:
         if (entry.instruction.opcode == Opcode::Fld ||
             entry.instruction.opcode == Opcode::Fsd) return entry.memoryComplete;
         return true;
     case Stage::WB: return true;
+    case Stage::Count: return false;
     }
     return false;
 }
@@ -328,29 +335,21 @@ Cpu::TransferPlan Cpu::calculateTransfers() const {
         plan.done[i] = stageDone(static_cast<Stage>(i), pipeline_[i]);
     }
 
-    const std::size_t wb = static_cast<std::size_t>(Stage::WB);
-    plan.willMove[wb] = pipeline_[wb].valid && plan.done[wb];
-    plan.canAccept[wb] = !pipeline_[wb].valid || plan.willMove[wb];
+    const std::size_t id2 = static_cast<std::size_t>(Stage::ID2);
+    plan.id2Hazard = checkIdHazard(pipeline_[id2]);
 
-    for (int stage = static_cast<int>(Stage::MEM);
-         stage >= static_cast<int>(Stage::EX); --stage) {
+    const std::size_t wb = static_cast<std::size_t>(Stage::WB);
+    for (int stage = static_cast<int>(Stage::WB); stage >= 0; --stage) {
         const auto i = static_cast<std::size_t>(stage);
-        const auto next = i + 1;
-        plan.willMove[i] = pipeline_[i].valid && plan.done[i] && plan.canAccept[next];
+        if (i == wb) {
+            plan.willMove[i] = pipeline_[i].valid && plan.done[i];
+        } else {
+            const bool dataReady = i != id2 || !plan.id2Hazard.stall;
+            plan.willMove[i] = pipeline_[i].valid && plan.done[i] &&
+                               plan.canAccept[i + 1] && dataReady;
+        }
         plan.canAccept[i] = !pipeline_[i].valid || plan.willMove[i];
     }
-
-    const std::size_t id = static_cast<std::size_t>(Stage::ID);
-    const std::size_t ex = static_cast<std::size_t>(Stage::EX);
-    plan.idHazard = checkIdHazard(pipeline_[id]);
-    plan.willMove[id] = pipeline_[id].valid && plan.done[id] &&
-                        plan.canAccept[ex] && !plan.idHazard.stall;
-    plan.canAccept[id] = !pipeline_[id].valid || plan.willMove[id];
-
-    const std::size_t fetch = static_cast<std::size_t>(Stage::IF);
-    plan.willMove[fetch] = pipeline_[fetch].valid && plan.done[fetch] &&
-                           plan.canAccept[id];
-    plan.canAccept[fetch] = !pipeline_[fetch].valid || plan.willMove[fetch];
     return plan;
 }
 
@@ -367,7 +366,7 @@ void Cpu::captureIdOperands(PipelineEntry& entry) const {
 
 std::optional<std::uint64_t> Cpu::resolveExOperand(RegisterRef source,
                                                   std::uint64_t idValue) const {
-    for (std::size_t stage = static_cast<std::size_t>(Stage::MEM);
+    for (std::size_t stage = static_cast<std::size_t>(Stage::EX2);
          stage <= static_cast<std::size_t>(Stage::WB); ++stage) {
         const auto& producer = pipeline_[stage];
         if (!writes(producer, source)) continue;
@@ -382,8 +381,8 @@ Tick Cpu::executionLatency(Opcode opcode, const TimingConfig& timing) {
         ? timing.addLatency : 0;
 }
 
-void Cpu::startExWork(PipelineEntry& entry) {
-    if (!entry.valid || entry.exStarted) return;
+void Cpu::startEx1Work(PipelineEntry& entry) {
+    if (!entry.valid || entry.ex1Started) return;
     std::size_t sourceCount = 0;
     const auto sourceList = sources(entry.instruction, sourceCount);
     std::array<std::uint64_t, 2> operands{};
@@ -395,62 +394,100 @@ void Cpu::startExWork(PipelineEntry& entry) {
     }
     entry.operandA = operands[0];
     entry.operandB = operands[1];
-    entry.exStarted = true;
-    const Tick latency = executionLatency(entry.instruction.opcode, timing_);
+    entry.ex1Started = true;
+    const Tick latency = entry.instruction.opcode == Opcode::Addi
+        ? executionLatency(entry.instruction.opcode, timing_) : 0;
     if (latency > std::numeric_limits<Tick>::max() - simulation_.now()) {
-        throw std::overflow_error("EX completion time overflow");
+        throw std::overflow_error("EX1 completion time overflow");
     }
-    entry.exReadyAt = simulation_.now() + latency;
+    entry.ex1ReadyAt = simulation_.now() + latency;
     if (simulation_.traceEvents()) {
-        std::cout << "[" << simulation_.now() << " ns] EX starts seq="
+        std::cout << "[" << simulation_.now() << " ns] EX1 starts seq="
                   << entry.sequenceNumber << " " << entry.instruction.toString()
                   << " using bypass-selected operands\n";
     }
-    completeReadyExWork(entry);
+    completeReadyEx1Work(entry);
 }
 
-void Cpu::completeReadyExWork(PipelineEntry& entry) {
-    if (!entry.valid || !entry.exStarted || entry.exComplete ||
-        simulation_.now() < entry.exReadyAt) return;
+void Cpu::completeReadyEx1Work(PipelineEntry& entry) {
+    if (!entry.valid || !entry.ex1Started || entry.ex1Complete ||
+        simulation_.now() < entry.ex1ReadyAt) return;
 
     const Instruction& instruction = entry.instruction;
     switch (instruction.opcode) {
     case Opcode::Fld:
-        entry.effectiveAddress = static_cast<std::uint32_t>(entry.operandA) +
-                                 static_cast<std::uint32_t>(instruction.immediate);
-        break;
-    case Opcode::FaddD:
-        entry.resultBits = doubleToBits(bitsToDouble(entry.operandA) +
-                                        bitsToDouble(entry.operandB));
-        entry.resultValid = true;
-        break;
     case Opcode::Fsd:
         entry.effectiveAddress = static_cast<std::uint32_t>(entry.operandA) +
                                  static_cast<std::uint32_t>(instruction.immediate);
-        entry.storeBits = entry.operandB;
+        if (instruction.opcode == Opcode::Fsd) entry.storeBits = entry.operandB;
         break;
     case Opcode::Addi:
         entry.resultBits = static_cast<std::uint32_t>(entry.operandA) +
                            static_cast<std::uint32_t>(instruction.immediate);
         entry.resultValid = true;
         break;
+    case Opcode::FaddD:
     case Opcode::Bne:
-        entry.branchTaken = static_cast<std::uint32_t>(entry.operandA) !=
-                            static_cast<std::uint32_t>(entry.operandB);
-        break;
     case Opcode::Halt:
         break;
     }
-    entry.exComplete = true;
+    entry.ex1Complete = true;
     if (simulation_.traceEvents()) {
-        std::cout << "[" << simulation_.now() << " ns] EX completes seq="
+        std::cout << "[" << simulation_.now() << " ns] EX1 completes seq="
                   << entry.sequenceNumber << " " << instruction.toString();
         if (instruction.opcode == Opcode::Fld || instruction.opcode == Opcode::Fsd) {
             std::cout << " effective-address=0x" << std::hex << entry.effectiveAddress
                       << std::dec;
         } else if (instruction.opcode == Opcode::Addi) {
             std::cout << " result=" << static_cast<std::uint32_t>(entry.resultBits);
-        } else if (instruction.opcode == Opcode::FaddD) {
+        }
+        std::cout << '\n';
+    }
+}
+
+void Cpu::startEx2Work(PipelineEntry& entry) {
+    if (!entry.valid || entry.ex2Started) return;
+    entry.ex2Started = true;
+    const Tick latency = entry.instruction.opcode == Opcode::FaddD
+        ? executionLatency(entry.instruction.opcode, timing_) : 0;
+    if (latency > std::numeric_limits<Tick>::max() - simulation_.now()) {
+        throw std::overflow_error("EX2 completion time overflow");
+    }
+    entry.ex2ReadyAt = simulation_.now() + latency;
+    if (simulation_.traceEvents()) {
+        std::cout << "[" << simulation_.now() << " ns] EX2 starts seq="
+                  << entry.sequenceNumber << " " << entry.instruction.toString()
+                  << '\n';
+    }
+    completeReadyEx2Work(entry);
+}
+
+void Cpu::completeReadyEx2Work(PipelineEntry& entry) {
+    if (!entry.valid || !entry.ex2Started || entry.ex2Complete ||
+        simulation_.now() < entry.ex2ReadyAt) return;
+
+    const Instruction& instruction = entry.instruction;
+    switch (instruction.opcode) {
+    case Opcode::FaddD:
+        entry.resultBits = doubleToBits(bitsToDouble(entry.operandA) +
+                                        bitsToDouble(entry.operandB));
+        entry.resultValid = true;
+        break;
+    case Opcode::Bne:
+        entry.branchTaken = static_cast<std::uint32_t>(entry.operandA) !=
+                            static_cast<std::uint32_t>(entry.operandB);
+        break;
+    case Opcode::Fld:
+    case Opcode::Fsd:
+    case Opcode::Addi:
+    case Opcode::Halt:
+        break;
+    }
+    entry.ex2Complete = true;
+    if (simulation_.traceEvents()) {
+        std::cout << "[" << simulation_.now() << " ns] EX2 completes seq="
+                  << entry.sequenceNumber << " " << instruction.toString();
+        if (instruction.opcode == Opcode::FaddD) {
             std::cout << " result=" << bitsToDouble(entry.resultBits);
         } else if (instruction.opcode == Opcode::Bne) {
             std::cout << " taken=" << (entry.branchTaken ? "yes" : "no");
@@ -500,11 +537,13 @@ void Cpu::updatePipeline(const TransferPlan& plan, bool redirect,
     }
 
     if (redirect) {
-        const std::size_t ex = static_cast<std::size_t>(Stage::EX);
-        const bool branchLeavesEx = plan.willMove[ex];
-        next[static_cast<std::size_t>(Stage::IF)] = PipelineEntry{};
-        next[static_cast<std::size_t>(Stage::ID)] = PipelineEntry{};
-        next[ex] = branchLeavesEx ? PipelineEntry{} : pipeline_[ex];
+        const std::size_t ex1 = static_cast<std::size_t>(Stage::EX1);
+        const std::size_t ex2 = static_cast<std::size_t>(Stage::EX2);
+        const bool branchLeavesEx2 = plan.willMove[ex2];
+        for (std::size_t i = 0; i <= ex1; ++i) {
+            next[i] = PipelineEntry{};
+        }
+        next[ex2] = branchLeavesEx2 ? PipelineEntry{} : pipeline_[ex2];
         if (fetchEpoch_ == std::numeric_limits<std::uint64_t>::max()) {
             throw std::overflow_error("fetch epoch overflow");
         }
@@ -513,8 +552,9 @@ void Cpu::updatePipeline(const TransferPlan& plan, bool redirect,
         fetchStopped_ = false;
         ++branchFlushes_;
         if (simulation_.traceEvents()) {
-            std::cout << "[" << simulation_.now() << " ns] Branch flushes younger IF/ID; "
-                      << "next PC=0x" << std::hex << redirectTarget << std::dec
+            std::cout << "[" << simulation_.now()
+                      << " ns] Branch flushes younger IF..EX1; next PC=0x"
+                      << std::hex << redirectTarget << std::dec
                       << " epoch=" << fetchEpoch_ << '\n';
         }
     }
@@ -522,9 +562,19 @@ void Cpu::updatePipeline(const TransferPlan& plan, bool redirect,
 }
 
 void Cpu::startNewStageWork() {
-    captureIdOperands(pipeline_[static_cast<std::size_t>(Stage::ID)]);
-    startExWork(pipeline_[static_cast<std::size_t>(Stage::EX)]);
-    issueMemoryRequest(pipeline_[static_cast<std::size_t>(Stage::MEM)]);
+    auto& id1 = pipeline_[static_cast<std::size_t>(Stage::ID1)];
+    if (id1.valid && !id1.decoded && id1.instructionReady) {
+        id1.decoded = true;
+        if (simulation_.traceEvents()) {
+            std::cout << "[" << simulation_.now() << " ns] ID1 decodes seq="
+                      << id1.sequenceNumber << " " << id1.instruction.toString()
+                      << '\n';
+        }
+    }
+    captureIdOperands(pipeline_[static_cast<std::size_t>(Stage::ID2)]);
+    startEx1Work(pipeline_[static_cast<std::size_t>(Stage::EX1)]);
+    startEx2Work(pipeline_[static_cast<std::size_t>(Stage::EX2)]);
+    issueMemoryRequest(pipeline_[static_cast<std::size_t>(Stage::MEM1)]);
     requestFetchIfNeeded();
 }
 
@@ -534,63 +584,77 @@ void Cpu::requestFetchIfNeeded() {
 
 void Cpu::logPipeline(const TransferPlan& plan) const {
     if (!simulation_.traceEvents()) return;
-    const bool color = useTerminalColor();
-    if (color) std::cout << "\033[36m";
-    std::cout << "[" << simulation_.now() << " ns] PIPE";
+    const bool color = simulation_.traceColor() && useTerminalColor();
+    std::ostringstream line;
+    if (color) line << "\033[36m";
+    line << "[" << simulation_.now() << " ns] PIPE";
     for (std::size_t i = 0; i < pipeline_.size(); ++i) {
-        std::cout << ' ' << stageName(i) << '=';
+        line << ' ' << stageName(i) << '=';
         if (!pipeline_[i].valid) {
-            std::cout << '-';
+            line << '-';
         } else {
-            std::cout << '#' << pipeline_[i].sequenceNumber;
+            line << '#' << pipeline_[i].sequenceNumber;
             if (pipeline_[i].instructionReady) {
-                std::cout << ':' << pipeline_[i].instruction.toString();
+                line << ':' << pipeline_[i].instruction.toString();
             } else {
-                std::cout << ":fetch-wait";
+                line << ":fetch-wait";
             }
-            if (!plan.done[i]) std::cout << "(wait)";
+            if (!plan.done[i]) line << "(wait)";
         }
     }
-    if (plan.idHazard.stall) std::cout << " | ID stall: " << plan.idHazard.reason;
-    if (color) std::cout << "\033[0m";
-    std::cout << '\n';
+    if (plan.id2Hazard.stall) line << " | ID2 stall: " << plan.id2Hazard.reason;
+    if (color) line << "\033[0m";
+    line << '\n';
+
+    const std::string snapshot = line.str();
+    std::cout << snapshot;
+    if (pipelineDisplay_ != nullptr) {
+        *pipelineDisplay_ << snapshot;
+        pipelineDisplay_->flush();
+    }
 }
 
 void Cpu::onClockEdge() {
     if (halted_) return;
     ++clockCycles_;
+    const auto& waitingMem2 = pipeline_[static_cast<std::size_t>(Stage::MEM2)];
+    if (waitingMem2.valid && !stageDone(Stage::MEM2, waitingMem2)) {
+        ++memoryWaitCycles_;
+    }
     applyResponses();
 
-    auto& ex = pipeline_[static_cast<std::size_t>(Stage::EX)];
-    completeReadyExWork(ex);
+    completeReadyEx1Work(pipeline_[static_cast<std::size_t>(Stage::EX1)]);
+    auto& ex2 = pipeline_[static_cast<std::size_t>(Stage::EX2)];
+    completeReadyEx2Work(ex2);
+
     const TransferPlan plan = calculateTransfers();
-    logPipeline(plan);
-    if (plan.idHazard.stall) ++dataHazardStalls_;
-    const auto& mem = pipeline_[static_cast<std::size_t>(Stage::MEM)];
-    if (mem.valid && !stageDone(Stage::MEM, mem)) ++memoryWaitCycles_;
+    if (plan.id2Hazard.stall) ++dataHazardStalls_;
 
     const std::size_t wb = static_cast<std::size_t>(Stage::WB);
     if (plan.willMove[wb]) writeBack(pipeline_[wb]);
-    captureIdOperands(pipeline_[static_cast<std::size_t>(Stage::ID)]);
+    captureIdOperands(pipeline_[static_cast<std::size_t>(Stage::ID2)]);
 
     bool redirect = false;
     std::uint32_t redirectTarget = 0;
-    if (ex.valid && ex.instruction.opcode == Opcode::Bne && ex.exComplete &&
-        ex.branchTaken && !ex.branchRedirected) {
+    if (ex2.valid && ex2.instruction.opcode == Opcode::Bne && ex2.ex2Complete &&
+        ex2.branchTaken && !ex2.branchRedirected) {
         redirect = true;
-        redirectTarget = ex.instruction.target;
-        ex.branchRedirected = true;
+        redirectTarget = ex2.instruction.target;
+        ex2.branchRedirected = true;
         ++takenBranches_;
     }
 
     updatePipeline(plan, redirect, redirectTarget);
     startNewStageWork();
+    logPipeline(calculateTransfers());
     scheduleNextClock();
 }
 
 const char* Cpu::stageName(std::size_t index) {
-    static constexpr const char* names[] = {"IF", "ID", "EX", "MEM", "WB"};
-    if (index >= 5) throw std::out_of_range("pipeline stage index");
+    static constexpr const char* names[] = {
+        "IF", "ID1", "ID2", "EX1", "EX2", "MEM1", "MEM2", "WB"
+    };
+    if (index >= kPipelineStages) throw std::out_of_range("pipeline stage index");
     return names[index];
 }
 

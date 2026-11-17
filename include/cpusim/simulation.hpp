@@ -11,9 +11,11 @@ enum class EventPhase : std::uint8_t { External = 0, CpuClock = 1 };
 struct Event {Tick time;EventPhase phase;std::uint64_t sequence;std::string name;std::function<void()> action;};
 class Simulation {
 public:
- explicit Simulation(bool traceEvents=true):traceEvents_(traceEvents){}
+ explicit Simulation(bool traceEvents=true, bool traceColor=true)
+     :traceEvents_(traceEvents),traceColor_(traceColor){}
  Tick now() const noexcept{return now_;}
  bool traceEvents() const noexcept{return traceEvents_;}
+ bool traceColor() const noexcept{return traceColor_;}
  std::size_t processedEvents() const noexcept{return processedEvents_;}
  bool stopRequested() const noexcept{return stopRequested_;}
  const std::string& stopReason() const noexcept{return stopReason_;}
@@ -34,6 +36,7 @@ private:
  std::size_t processedEvents_=0;
  bool stopRequested_=false;
  bool traceEvents_=true;
+ bool traceColor_=true;
  std::string stopReason_="NotStarted";
  std::priority_queue<Event,std::vector<Event>,Later> events_;
 };
