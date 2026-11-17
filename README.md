@@ -19,9 +19,7 @@ Halt:
 
 ```text
 include/cpusim/       流水线模拟器和事件队列头文件
-include/cpusim/legacy/旧顺序模拟器头文件
 src/                  流水线模拟器实现和主程序
-src/legacy/           原顺序模拟器实现
 tests/                测试程序
 build/                本机构建输出，由 Git 忽略
 ```
@@ -86,11 +84,9 @@ cd /home/jiake/class/arch/homework1
 make
 make test
 ./build/simulator
-make legacy
-./build/legacy-simulator
 ```
 
-`make` 将可执行文件、对象文件和依赖文件生成到 `build/`。`make test` 检查两元素循环、单元素不跳转退出、浮点结果、访存等待、RAW 停顿、分支冲刷，以及同时间外部事件先于 CPU 边沿的规则。执行 `./build/simulator` 会打印逐事件和逐周期流水线轨迹，并核对最终内存结果。`make legacy` 可单独构建整理前的顺序模拟器。
+`make` 将可执行文件、对象文件和依赖文件生成到 `build/`。`make test` 检查两元素循环、单元素不跳转退出、浮点结果、访存等待、RAW 停顿、分支冲刷，以及同时间外部事件先于 CPU 边沿的规则。执行 `./build/simulator` 会打印逐事件和逐周期流水线轨迹，并核对最终内存结果。
 
 ## 当前范围
 
